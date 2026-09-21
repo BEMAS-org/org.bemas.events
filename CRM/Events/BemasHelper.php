@@ -1,0 +1,321 @@
+<?php
+
+/**
+ * Generic data-access/codec helpers backing CRM_Events_BemasCatering.
+ *
+ * IMPORTANT: this install has true multilingual column-splitting
+ * (civicrm_event.title, civicrm_price_set.title, civicrm_price_field_value.
+ * label/description are each three physical columns: _en_US/_nl_NL/_fr_FR).
+ * CiviCRM's DAO layer silently rewrites bare table/column names to whichever
+ * locale is active for the current request - not guaranteed consistent
+ * across admin actions, and a rewritten table's view doesn't expose other
+ * locales' columns (so e.g. `title_nl_NL` fails once rewritten to
+ * `civicrm_event_en_US`). So every query here that touches automation
+ * bookkeeping (not UI cosmetics) names the real `_nl_NL` column AND passes
+ * `$i18nRewrite = FALSE`, hitting the base table directly.
+ */
+class CRM_Events_BemasHelper {
+
+  /**
+   * Check whether an event already has registrations, i.e. its pricing is locked.
+   *
+   * @param int $eventId
+   * @return bool TRUE if the event has at least one non-cancelled participant.
+   */
+  public static function eventHasLiveParticipants($eventId) {
+    $sql = "
+      SELECT 1
+      FROM civicrm_participant p
+      INNER JOIN civicrm_participant_status_type st ON st.id = p.status_id
+      WHERE p.event_id = %1 AND st.class <> 'Negative' AND p.is_test = 0
+      LIMIT 1
+    ";
+    return (bool) CRM_Core_DAO::singleValueQuery($sql, [1 => [(int) $eventId, 'Integer']]);
+  }
+
+  /**
+   * Resolve the event id a price set belongs to (for UI freezing purposes -
+   * unlike resolveManagedEventForPriceSet() in BemasCatering, does not refuse
+   * shared sets, since freezing a shared set's amount field when any one of
+   * its events is locked is the conservative, safe default for the UI).
+   *
+   * @param int $priceSetId
+   * @return int|null
+   */
+  public static function getEventIdForPriceSet($priceSetId) {
+    return (int) CRM_Core_DAO::singleValueQuery(
+      "SELECT entity_id FROM civicrm_price_set_entity WHERE price_set_id = %1 AND entity_table = 'civicrm_event' LIMIT 1",
+      [1 => [(int) $priceSetId, 'Integer']]
+    ) ?: NULL;
+  }
+
+  /**
+   * Resolve an event's title, preferring the `_nl_NL` column (BEMAS's
+   * operational language, and the only one automation logic should trust by
+   * default) but falling back to `_en_US`/`_fr_FR` when the Dutch title
+   * doesn't follow the "<code> - <description>" convention. This matters in
+   * practice: events created via "Copy Previous Event" start with a
+   * placeholder Dutch title (e.g. "Copy of Titel opleiding"), and staff
+   * sometimes then rename the event while browsing the English admin UI -
+   * which only updates `title_en_US`, leaving the stale Dutch placeholder
+   * behind. Without this fallback, a validly-renamed event would silently
+   * skip automation just because the wrong locale column got edited.
+   *
+   * @param int $eventId
+   * @return string
+   *   The first locale's title (in nl_NL, en_US, fr_FR order) that follows
+   *   the "<code> - <description>" convention; the raw nl_NL title (which
+   *   may be empty or not follow the convention) if none of them do.
+   */
+  private static function resolveEventTitle($eventId) {
+    $titles = CRM_Core_DAO::executeQuery(
+      'SELECT title_nl_NL, title_en_US, title_fr_FR FROM civicrm_event WHERE id = %1',
+      [1 => [$eventId, 'Integer']],
+      TRUE,
+      NULL,
+      FALSE,
+      FALSE
+    );
+    if (!$titles->fetch()) {
+      return '';
+    }
+    foreach ([$titles->title_nl_NL, $titles->title_en_US, $titles->title_fr_FR] as $candidate) {
+      if (count(explode(' - ', trim((string) $candidate))) >= 2) {
+        return trim((string) $candidate);
+      }
+    }
+    return trim((string) $titles->title_nl_NL);
+  }
+
+  /**
+   * Build a price set title that's easy to find in the (very long) admin
+   * "Manage Price Sets" listing: the event title plus a searchable event id
+   * marker.
+   *
+   * @param int $eventId
+   * @return string
+   */
+  public static function buildFindableTitle($eventId) {
+    return self::resolveEventTitle($eventId) . ' (Event #' . $eventId . ')';
+  }
+
+  /**
+   * Make sure an already-existing price set (e.g. one CiviCRM's own Fees tab
+   * created before this automation ever ran for this event) has a findable
+   * title too - only rewrites it if it doesn't already carry the marker, so
+   * this doesn't stomp on a title staff may have customized themselves.
+   *
+   * @param int $priceSetId
+   * @param int $eventId
+   */
+  public static function ensureFindableTitle($priceSetId, $eventId) {
+    $marker = '(Event #' . $eventId . ')';
+    $currentTitle = (string) CRM_Core_DAO::singleValueQuery(
+      'SELECT title_nl_NL FROM civicrm_price_set WHERE id = %1',
+      [1 => [$priceSetId, 'Integer']],
+      TRUE,
+      FALSE
+    );
+    if (strpos($currentTitle, $marker) === FALSE) {
+      $findableTitle = self::buildFindableTitle($eventId);
+      CRM_Core_DAO::executeQuery(
+        'UPDATE civicrm_price_set SET title_en_US = %2, title_nl_NL = %2, title_fr_FR = %2 WHERE id = %1',
+        [
+          1 => [$priceSetId, 'Integer'],
+          2 => [$findableTitle, 'String'],
+        ],
+        TRUE,
+        NULL,
+        FALSE,
+        FALSE
+      );
+    }
+  }
+
+  /**
+   * Look up a price field value's current label.
+   *
+   * @param int $priceFieldValueId
+   * @return string|null
+   */
+  public static function getPriceFieldValueLabel($priceFieldValueId) {
+    if (empty($priceFieldValueId)) {
+      return NULL;
+    }
+    return CRM_Core_DAO::singleValueQuery(
+      'SELECT label_nl_NL FROM civicrm_price_field_value WHERE id = %1',
+      [1 => [$priceFieldValueId, 'Integer']],
+      TRUE,
+      FALSE
+    );
+  }
+
+  /**
+   * Resolve which price field a price field value belongs to.
+   *
+   * @param int $priceFieldValueId
+   * @return int|null
+   */
+  public static function getPriceFieldIdForValueId($priceFieldValueId) {
+    if (empty($priceFieldValueId)) {
+      return NULL;
+    }
+    return (int) CRM_Core_DAO::singleValueQuery(
+      'SELECT price_field_id FROM civicrm_price_field_value WHERE id = %1',
+      [1 => [$priceFieldValueId, 'Integer']],
+      TRUE,
+      FALSE
+    );
+  }
+
+  /**
+   * Read an event's configured Catering rate custom field value.
+   *
+   * @param int $eventId
+   * @return string|null
+   *   '25', '65', 'Exception', or NULL when not configured.
+   */
+  public static function getCateringRate($eventId) {
+    $fieldName = CRM_Invoicestoexact_Config::singleton()->getEventCateringRateCustomField('name');
+    if (empty($fieldName)) {
+      return NULL;
+    }
+    $fqn = 'Activiteit_status.' . $fieldName;
+
+    $event = \Civi\Api4\Event::get(FALSE)
+      ->addSelect($fqn)
+      ->addWhere('id', '=', $eventId)
+      ->execute()->first();
+
+    $value = $event[$fqn] ?? NULL;
+    return ($value === NULL || $value === '') ? NULL : (string) $value;
+  }
+
+  /**
+   * Read an event's configured Catering days custom field value.
+   *
+   * @param int $eventId
+   * @return int
+   */
+  public static function getCateringDays($eventId) {
+    $fieldName = CRM_Invoicestoexact_Config::singleton()->getEventCateringDaysCustomField('name');
+    if (empty($fieldName)) {
+      return 0;
+    }
+    $fqn = 'Activiteit_status.' . $fieldName;
+
+    $event = \Civi\Api4\Event::get(FALSE)
+      ->addSelect($fqn)
+      ->addWhere('id', '=', $eventId)
+      ->execute()->first();
+
+    $value = $event[$fqn] ?? NULL;
+    return is_numeric($value) ? max(0, (int) $value) : 0;
+  }
+
+  /**
+   * Extract the event code from an event's title.
+   *
+   * @param int $eventId
+   * @return string
+   *   The event code (the part of the title before " - "), e.g.
+   *   "TC260310-05V - Some Title" -> "TC260310-05V". Empty string when the
+   *   title doesn't follow the "<code> - <description>" convention.
+   */
+  public static function getEventCode($eventId) {
+    $title = self::resolveEventTitle($eventId);
+    $parts = explode(' - ', $title);
+    return count($parts) >= 2 ? trim($parts[0]) : '';
+  }
+
+  /**
+   * Decide whether a price field value's label marks it as automation-managed.
+   *
+   * @param string|null $label
+   * @param array $flatTierLabels
+   *   Labels of flat/administrative tiers that are never automation-managed
+   *   (matched case-insensitively, trimmed) - see
+   *   CRM_Events_BemasCatering::FLAT_TIER_LABELS.
+   * @return bool TRUE unless the label matches one of $flatTierLabels.
+   */
+  public static function isManagedLabel($label, array $flatTierLabels) {
+    $label = strtolower(trim((string) $label));
+    if ($label === '') {
+      return FALSE;
+    }
+    return !in_array($label, $flatTierLabels, TRUE);
+  }
+
+  /**
+   * Build the shadow bookkeeping record stored per managed price field value.
+   *
+   * @param float $allIn
+   * @param float $rate
+   * @param int $days
+   * @param float $net
+   * @return array
+   */
+  public static function buildShadow($allIn, $rate, $days, $net) {
+    return [
+      'bemas_catering_managed' => 1,
+      'all_in' => round((float) $allIn, 2),
+      'rate' => round((float) $rate, 2),
+      'days' => (int) $days,
+      'net' => round((float) $net, 2),
+    ];
+  }
+
+  /**
+   * Decode a shadow record, ignoring anything not written by this automation.
+   *
+   * @param string|null $raw
+   * @return array|null
+   */
+  public static function decodeShadow($raw) {
+    if (empty($raw)) {
+      return NULL;
+    }
+    $decoded = json_decode($raw, TRUE);
+    if (!is_array($decoded) || empty($decoded['bemas_catering_managed'])) {
+      return NULL;
+    }
+    return $decoded;
+  }
+
+  /**
+   * Read and decode a price field value's stored shadow record.
+   *
+   * @param int $priceFieldValueId
+   * @return array|null
+   */
+  public static function readShadow($priceFieldValueId) {
+    $raw = CRM_Core_DAO::singleValueQuery(
+      'SELECT description_nl_NL FROM civicrm_price_field_value WHERE id = %1',
+      [1 => [$priceFieldValueId, 'Integer']],
+      TRUE,
+      FALSE
+    );
+    return self::decodeShadow($raw);
+  }
+
+  /**
+   * Persist a shadow record onto a price field value's description column.
+   *
+   * @param int $priceFieldValueId
+   * @param array $shadow
+   */
+  public static function writeShadow($priceFieldValueId, array $shadow) {
+    CRM_Core_DAO::executeQuery(
+      'UPDATE civicrm_price_field_value SET description_nl_NL = %2 WHERE id = %1',
+      [
+        1 => [$priceFieldValueId, 'Integer'],
+        2 => [json_encode($shadow), 'String'],
+      ],
+      TRUE,
+      NULL,
+      FALSE,
+      FALSE
+    );
+  }
+
+}

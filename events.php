@@ -2,6 +2,7 @@
 
 require_once 'events.civix.php';
 use CRM_Events_ExtensionUtil as E;
+use CRM_Events_BemasHelper as Helper;
 
 function events_civicrm_custom($op, $groupID, $entityID, &$params) {
   if ($op == 'create' || $op == 'edit') {
@@ -11,6 +12,51 @@ function events_civicrm_custom($op, $groupID, $entityID, &$params) {
     catch (Exception $e) {
       CRM_Core_Session::setStatus($e->getMessage(), ts('Error'), 'error');
     }
+  }
+}
+
+/**
+ * Implements hook_civicrm_customPre().
+ *
+ * Fires before a custom field value is written (unlike hook_civicrm_custom
+ * above, which only fires after) - used to hard-block edits to the Catering
+ * rate/days fields once an event is locked, regardless of which screen the
+ * edit came from. See CRM_Events_BemasCatering::onEventDetailsPre().
+ */
+function events_civicrm_customPre($op, $groupID, $entityID, &$params) {
+  if (in_array($op, ['create', 'edit'])) {
+    CRM_Events_BemasCatering::onEventDetailsPre($op, $groupID, $entityID, $params);
+  }
+}
+
+/**
+ * Implements hook_civicrm_pre().
+ *
+ * Intercepts saves of a registration-fee Price Field Value to automatically
+ * derive its net (all-in minus catering) amount, for automation-managed
+ * events/tiers. See CRM_Events_BemasCatering for the full logic.
+ */
+function events_civicrm_pre($op, $objectName, $id, &$params) {
+  if ($objectName == 'PriceFieldValue' && in_array($op, ['create', 'edit'])) {
+    try {
+      CRM_Events_BemasCatering::onPriceFieldValuePre($op, $id, $params);
+    }
+    catch (Exception $e) {
+      CRM_Core_Session::setStatus($e->getMessage(), ts('Error'), 'error');
+      throw $e;
+    }
+  }
+}
+
+/**
+ * Implements hook_civicrm_post().
+ *
+ * Persists the shadow bookkeeping record for a brand new Price Field Value,
+ * once its id is known (see CRM_Events_BemasCatering::onPriceFieldValuePre()).
+ */
+function events_civicrm_post($op, $objectName, $objectId, $objectRef) {
+  if ($objectName == 'PriceFieldValue' && $op == 'create') {
+    CRM_Events_BemasCatering::onPriceFieldValuePost($objectId);
   }
 }
 
@@ -67,6 +113,37 @@ function events_civicrm_buildForm($formName, &$form) {
       if (count($defaults) > 0) {
         $form->setDefaults($defaults);
       }
+    }
+  }
+
+  if ($formName == 'CRM_Event_Form_ManageEvent_EventInfo' && !empty($form->_id)) {
+    if (Helper::eventHasLiveParticipants((int) $form->_id)) {
+      foreach (['getEventCateringRateCustomField', 'getEventCateringDaysCustomField'] as $getter) {
+        $fieldId = CRM_Invoicestoexact_Config::singleton()->$getter('id');
+        if (!empty($fieldId) && $form->elementExists('custom_' . $fieldId)) {
+          $form->getElement('custom_' . $fieldId)->freeze();
+        }
+      }
+    }
+  }
+
+  if ($formName == 'CRM_Event_Form_ManageEvent_Fee' && !empty($form->_id)) {
+    $priceSetId = CRM_Price_BAO_PriceSet::getFor('civicrm_event', (int) $form->_id);
+    if (!empty($priceSetId)) {
+      $url = CRM_Utils_System::url('civicrm/admin/price/field', 'reset=1&sid=' . $priceSetId);
+      CRM_Core_Session::setStatus(
+        ts('This event\'s price fields (including any automated catering field) can be viewed/edited directly at: %1', [1 => '<a href="' . $url . '" target="_blank">' . $url . '</a>']),
+        ts('Price set'),
+        'info'
+      );
+    }
+  }
+
+  if ($formName == 'CRM_Price_Form_Option') {
+    $priceSetId = CRM_Utils_Request::retrieve('sid', 'Positive');
+    $eventId = !empty($priceSetId) ? Helper::getEventIdForPriceSet($priceSetId) : NULL;
+    if (!empty($eventId) && Helper::eventHasLiveParticipants($eventId) && $form->elementExists('amount')) {
+      $form->getElement('amount')->freeze();
     }
   }
 }
