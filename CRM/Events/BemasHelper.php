@@ -248,16 +248,22 @@ class CRM_Events_BemasHelper {
 
   /**
    * Build the shadow bookkeeping record stored per managed price field value.
+   * Tagged with the event id it was computed for, so a shadow inherited from
+   * a different event (e.g. via "Copy Previous Event", which duplicates the
+   * whole price set including this description) is never mistaken for this
+   * event's own history - see isShadowForEvent().
    *
    * @param float $allIn
    * @param float $rate
    * @param int $days
    * @param float $net
+   * @param int $eventId
    * @return array
    */
-  public static function buildShadow($allIn, $rate, $days, $net) {
+  public static function buildShadow($allIn, $rate, $days, $net, $eventId) {
     return [
       'bemas_catering_managed' => 1,
+      'event_id' => (int) $eventId,
       'all_in' => round((float) $allIn, 2),
       'rate' => round((float) $rate, 2),
       'days' => (int) $days,
@@ -266,7 +272,50 @@ class CRM_Events_BemasHelper {
   }
 
   /**
+   * @param array|null $shadow
+   * @param int $eventId
+   * @return bool TRUE if the shadow was computed for this event, or was
+   *   written before this tagging existed (no event_id - trusted as-is,
+   *   rather than invalidating every already-correct historical shadow;
+   *   it gets tagged on its next write). FALSE only for a shadow that IS
+   *   tagged but for a different event - i.e. copied over via "Copy
+   *   Previous Event" (which duplicates the whole price set, description
+   *   included) - never trusted for comparison against this event.
+   */
+  public static function isShadowForEvent($shadow, $eventId) {
+    if (empty($shadow)) {
+      return FALSE;
+    }
+    if (!array_key_exists('event_id', $shadow)) {
+      return TRUE;
+    }
+    return (int) $shadow['event_id'] === (int) $eventId;
+  }
+
+  /**
+   * Human-readable summary line + the raw JSON on its own line, written to
+   * the price field value's Description (visible via CiviCRM's own "Edit
+   * Option" screen) so the original all-in figure isn't only ever visible by
+   * querying the database directly.
+   *
+   * @return string
+   */
+  public static function formatShadowForStorage(array $shadow) {
+    $summary = sprintf(
+      'All-in: EUR %.2f - Catering: EUR %.2f x %d days = EUR %.2f - Net: EUR %.2f',
+      $shadow['all_in'],
+      $shadow['rate'],
+      $shadow['days'],
+      $shadow['rate'] * $shadow['days'],
+      $shadow['net']
+    );
+    return $summary . "\n" . json_encode($shadow);
+  }
+
+  /**
    * Decode a shadow record, ignoring anything not written by this automation.
+   * Tolerant of the human-readable summary line formatShadowForStorage()
+   * prepends - extracts just the JSON part.
    *
    * @param string|null $raw
    * @return array|null
@@ -274,6 +323,9 @@ class CRM_Events_BemasHelper {
   public static function decodeShadow($raw) {
     if (empty($raw)) {
       return NULL;
+    }
+    if (preg_match('/\{.*\}/s', $raw, $matches)) {
+      $raw = $matches[0];
     }
     $decoded = json_decode($raw, TRUE);
     if (!is_array($decoded) || empty($decoded['bemas_catering_managed'])) {
@@ -309,7 +361,7 @@ class CRM_Events_BemasHelper {
       'UPDATE civicrm_price_field_value SET description_nl_NL = %2 WHERE id = %1',
       [
         1 => [$priceFieldValueId, 'Integer'],
-        2 => [json_encode($shadow), 'String'],
+        2 => [self::formatShadowForStorage($shadow), 'String'],
       ],
       TRUE,
       NULL,

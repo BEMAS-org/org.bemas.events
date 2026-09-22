@@ -107,8 +107,18 @@ class CRM_Events_BemasCatering {
       return;
     }
 
+    if (!self::hasRegularFeesField($priceSetId)) {
+      // Regular Fees hasn't been configured for this event yet. Creating the
+      // CAT-* field now would leave it as the price set's only field, which
+      // breaks CiviCRM's own Regular Fees screen (CRM_Event_Form_ManageEvent_Fee
+      // naively assumes a price set has exactly one field and would mistake
+      // CAT-* for the fee field, corrupting it on save). Deferred instead -
+      // onPriceFieldValuePre() creates CAT-* once a real fee is first entered.
+      return;
+    }
+
     self::findOrCreateCateringField($priceSetId, $code, $rateValue);
-    self::recomputeManagedTiers($priceSetId, $rateValue, $days);
+    self::recomputeManagedTiers($priceSetId, $rateValue, $days, $eventId);
   }
 
   /**
@@ -181,11 +191,22 @@ class CRM_Events_BemasCatering {
     $days = Helper::getCateringDays($eventId);
 
     $code = CRM_Invoicestoexact_ExactHelper::buildCateringCode(Helper::getEventCode($eventId));
-    if ($code === '' || empty(self::findCateringField((int) $fieldDao->price_set_id, $code))) {
+    if ($code === '') {
       return;
     }
+    // Safe to create CAT-* here (unlike onEventDetailsSave()): this fires on a
+    // Radio-type PriceFieldValue save, so the price set already has its Regular
+    // Fees field by now - CAT-* becomes the second field, never the first.
+    self::findOrCreateCateringField((int) $fieldDao->price_set_id, $code, $rateValue);
 
     $existingShadow = ($op === 'edit' && !empty($id)) ? Helper::readShadow((int) $id) : NULL;
+    if (!Helper::isShadowForEvent($existingShadow, $eventId)) {
+      // Inherited from a different event (e.g. via "Copy Previous Event", which
+      // duplicates the whole price set including this description) - not
+      // applicable to this event. Treat as if this row has never been seen
+      // here, so whatever's typed now is respected as a fresh all-in entry.
+      $existingShadow = NULL;
+    }
 
     $label = $params['label'] ?? (($op === 'edit' && !empty($id)) ? Helper::getPriceFieldValueLabel((int) $id) : NULL);
     if (empty($existingShadow) && !Helper::isManagedLabel($label, self::FLAT_TIER_LABELS)) {
@@ -206,7 +227,7 @@ class CRM_Events_BemasCatering {
     $net = max(0.0, $allIn - ($rateValue * $days));
     $params['amount'] = $net;
 
-    $shadow = Helper::buildShadow($allIn, $rateValue, $days, $net);
+    $shadow = Helper::buildShadow($allIn, $rateValue, $days, $net, $eventId);
 
     if ($op === 'edit' && !empty($id)) {
       Helper::writeShadow((int) $id, $shadow);
@@ -267,6 +288,17 @@ class CRM_Events_BemasCatering {
     Helper::ensureFindableTitle((int) $priceSet->id, $eventId);
 
     return (int) $priceSet->id;
+  }
+
+  /**
+   * @return bool TRUE if the price set already has an active Regular Fees
+   *   (non-Text) field - i.e. staff have configured Fees at least once.
+   */
+  private static function hasRegularFeesField($priceSetId) {
+    return (bool) CRM_Core_DAO::singleValueQuery(
+      "SELECT 1 FROM civicrm_price_field WHERE price_set_id = %1 AND html_type <> 'Text' AND is_active = 1 LIMIT 1",
+      [1 => [$priceSetId, 'Integer']]
+    );
   }
 
   /**
@@ -339,8 +371,9 @@ class CRM_Events_BemasCatering {
    * @param int $priceSetId
    * @param float $rateValue
    * @param int $days
+   * @param int $eventId
    */
-  private static function recomputeManagedTiers($priceSetId, $rateValue, $days) {
+  private static function recomputeManagedTiers($priceSetId, $rateValue, $days, $eventId) {
     $dao = CRM_Core_DAO::executeQuery(
       "SELECT pfv.id, pfv.label_nl_NL AS label, pfv.amount, pfv.description_nl_NL AS description
        FROM civicrm_price_field_value pfv
@@ -355,6 +388,16 @@ class CRM_Events_BemasCatering {
 
     while ($dao->fetch()) {
       $shadow = Helper::decodeShadow($dao->description);
+
+      if (!empty($shadow) && !Helper::isShadowForEvent($shadow, $eventId)) {
+        // Inherited from a different event (e.g. via "Copy Previous Event") -
+        // the current amount is that other event's net, not a genuine all-in
+        // for this one. Never guess; skip and let staff re-enter this fee's
+        // all-in price once, which correctly converts it and re-tags the
+        // shadow to this event via onPriceFieldValuePre().
+        Civi::log()->warning('BEMAS catering automation: price field value ' . $dao->id . ' for event ' . $eventId . ' carries pricing inherited from a different event - skipping automatic recompute until the all-in price is re-entered for this event.');
+        continue;
+      }
 
       if (empty($shadow)) {
         // First time seen: bootstrap from the current amount as the all-in
@@ -379,7 +422,7 @@ class CRM_Events_BemasCatering {
         FALSE
       );
 
-      Helper::writeShadow((int) $dao->id, Helper::buildShadow($allIn, $rateValue, $days, $net));
+      Helper::writeShadow((int) $dao->id, Helper::buildShadow($allIn, $rateValue, $days, $net, $eventId));
     }
   }
 
