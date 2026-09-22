@@ -17,6 +17,59 @@
 class CRM_Events_BemasHelper {
 
   /**
+   * This domain's configured multilingual locales (e.g. ['en_US','nl_NL','fr_FR']),
+   * read from civicrm_domain.locales - the same source CiviCRM itself uses to
+   * decide which "_xx_YY"-suffixed columns physically exist. Used instead of a
+   * hardcoded list so writeToAllLocales() keeps working if a locale is ever
+   * added or removed, with no code change needed here.
+   *
+   * @return array
+   */
+  private static function getConfiguredLocales() {
+    static $locales = NULL;
+    if ($locales === NULL) {
+      $raw = (string) CRM_Core_DAO::singleValueQuery(
+        'SELECT locales FROM civicrm_domain WHERE id = %1',
+        [1 => [(int) CRM_Core_Config::domainID(), 'Integer']]
+      );
+      $locales = array_filter(explode(CRM_Core_DAO::VALUE_SEPARATOR, $raw));
+    }
+    return $locales;
+  }
+
+  /**
+   * Write the same value to a locale-split column (e.g. price_set.title,
+   * price_field_value.description) across every configured locale, so it
+   * reads correctly regardless of which UI language a viewer is browsing in.
+   *
+   * @param string $table
+   * @param string $column
+   * @param int $id
+   * @param string $value
+   */
+  private static function writeToAllLocales($table, $column, $id, $value) {
+    $locales = self::getConfiguredLocales();
+    if (empty($locales)) {
+      return;
+    }
+    $setClauses = [];
+    foreach ($locales as $locale) {
+      $setClauses[] = "{$column}_{$locale} = %2";
+    }
+    CRM_Core_DAO::executeQuery(
+      "UPDATE {$table} SET " . implode(', ', $setClauses) . ' WHERE id = %1',
+      [
+        1 => [(int) $id, 'Integer'],
+        2 => [$value, 'String'],
+      ],
+      TRUE,
+      NULL,
+      FALSE,
+      FALSE
+    );
+  }
+
+  /**
    * Check whether an event already has registrations, i.e. its pricing is locked.
    *
    * @param int $eventId
@@ -117,18 +170,7 @@ class CRM_Events_BemasHelper {
       FALSE
     );
     if (strpos($currentTitle, $marker) === FALSE) {
-      $findableTitle = self::buildFindableTitle($eventId);
-      CRM_Core_DAO::executeQuery(
-        'UPDATE civicrm_price_set SET title_en_US = %2, title_nl_NL = %2, title_fr_FR = %2 WHERE id = %1',
-        [
-          1 => [$priceSetId, 'Integer'],
-          2 => [$findableTitle, 'String'],
-        ],
-        TRUE,
-        NULL,
-        FALSE,
-        FALSE
-      );
+      self::writeToAllLocales('civicrm_price_set', 'title', $priceSetId, self::buildFindableTitle($eventId));
     }
   }
 
@@ -352,22 +394,17 @@ class CRM_Events_BemasHelper {
 
   /**
    * Persist a shadow record onto a price field value's description column.
+   * Written to every configured locale (not just nl_NL) so the human-readable
+   * summary is visible via CiviCRM's own "Edit Option" screen regardless of
+   * which UI language an admin is browsing in - that core screen reads via
+   * the ambient locale, unlike readShadow()/decodeShadow() below, which stay
+   * pinned to nl_NL for the automation's own determinism.
    *
    * @param int $priceFieldValueId
    * @param array $shadow
    */
   public static function writeShadow($priceFieldValueId, array $shadow) {
-    CRM_Core_DAO::executeQuery(
-      'UPDATE civicrm_price_field_value SET description_nl_NL = %2 WHERE id = %1',
-      [
-        1 => [$priceFieldValueId, 'Integer'],
-        2 => [self::formatShadowForStorage($shadow), 'String'],
-      ],
-      TRUE,
-      NULL,
-      FALSE,
-      FALSE
-    );
+    self::writeToAllLocales('civicrm_price_field_value', 'description', $priceFieldValueId, self::formatShadowForStorage($shadow));
   }
 
 }

@@ -364,9 +364,13 @@ class CRM_Events_BemasCatering {
   }
 
   /**
-   * Re-derive the net amount for every automation-managed price field value
-   * in the given price set, from its stored all-in figure - never from the
-   * currently-displayed net amount, so a rate/days change never compounds.
+   * Re-derive the net amount for every already-managed price field value in
+   * the given price set (i.e. one that already has a shadow, meaning staff
+   * have explicitly saved a Fees amount for it at least once), from its
+   * stored all-in figure - never from the currently-displayed net amount, so
+   * a rate/days change never compounds. Rows with no shadow yet are left
+   * untouched - a rate/days change alone never activates automation for a
+   * fee that's never actually been confirmed via a Fees save.
    *
    * @param int $priceSetId
    * @param float $rateValue
@@ -400,17 +404,16 @@ class CRM_Events_BemasCatering {
       }
 
       if (empty($shadow)) {
-        // First time seen: bootstrap from the current amount as the all-in
-        // figure, unless it's a flat tier (never touched).
-        if (!Helper::isManagedLabel($dao->label, self::FLAT_TIER_LABELS)) {
-          continue;
-        }
-        $allIn = (float) $dao->amount;
-      }
-      else {
-        $allIn = (float) $shadow['all_in'];
+        // Never explicitly confirmed via a Fees save for this event - do NOT
+        // silently treat the current amount as a genuine all-in just because
+        // the Catering rate/days changed. It may be inherited from an Event
+        // Template or a copied event and never actually reviewed by staff.
+        // Leave it untouched; staff's next Fees save (even re-saving the
+        // same number) is what activates automation, via onPriceFieldValuePre().
+        continue;
       }
 
+      $allIn = (float) $shadow['all_in'];
       $net = max(0.0, $allIn - ($rateValue * $days));
 
       CRM_Core_DAO::executeQuery(
