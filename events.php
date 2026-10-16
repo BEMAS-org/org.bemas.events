@@ -2,7 +2,6 @@
 
 require_once 'events.civix.php';
 use CRM_Events_ExtensionUtil as E;
-use CRM_Events_BemasHelper as Helper;
 
 function events_civicrm_custom($op, $groupID, $entityID, &$params) {
   if ($op == 'create' || $op == 'edit') {
@@ -12,20 +11,6 @@ function events_civicrm_custom($op, $groupID, $entityID, &$params) {
     catch (Exception $e) {
       CRM_Core_Session::setStatus($e->getMessage(), ts('Error'), 'error');
     }
-  }
-}
-
-/**
- * Implements hook_civicrm_customPre().
- *
- * Fires before a custom field value is written (unlike hook_civicrm_custom
- * above, which only fires after) - used to hard-block edits to the Catering
- * rate/days fields once an event is locked, regardless of which screen the
- * edit came from. See CRM_Events_BemasCatering::onEventDetailsPre().
- */
-function events_civicrm_customPre($op, $groupID, $entityID, &$params) {
-  if (in_array($op, ['create', 'edit'])) {
-    CRM_Events_BemasCatering::onEventDetailsPre($op, $groupID, $entityID, $params);
   }
 }
 
@@ -43,7 +28,6 @@ function events_civicrm_pre($op, $objectName, $id, &$params) {
     }
     catch (Exception $e) {
       CRM_Core_Session::setStatus($e->getMessage(), ts('Error'), 'error');
-      throw $e;
     }
   }
 }
@@ -116,12 +100,23 @@ function events_civicrm_buildForm($formName, &$form) {
     }
   }
 
-  if ($formName == 'CRM_Event_Form_ManageEvent_EventInfo' && !empty($form->_id)) {
-    if (Helper::eventHasLiveParticipants((int) $form->_id)) {
-      foreach (['getEventCateringRateCustomField', 'getEventCateringDaysCustomField'] as $getter) {
-        $fieldId = CRM_Invoicestoexact_Config::singleton()->$getter('id');
-        if (!empty($fieldId) && $form->elementExists('custom_' . $fieldId)) {
-          $form->getElement('custom_' . $fieldId)->freeze();
+  if ($formName == 'CRM_Event_Form_Participant') {
+    $eventId = $form->getEventID();
+    if (!empty($eventId)) {
+      $days = CRM_Events_BemasHelper::getCateringDays($eventId);
+      $code = CRM_Invoicestoexact_ExactHelper::buildCateringCode(CRM_Events_BemasHelper::getEventCode($eventId));
+      $priceSetId = $code !== '' ? CRM_Price_BAO_PriceSet::getFor('civicrm_event', $eventId) : NULL;
+      $cateringField = !empty($priceSetId) ? CRM_Events_BemasCatering::findCateringField($priceSetId, $code) : NULL;
+      if ($days > 0 && !empty($cateringField)) {
+        $elementName = 'price_' . $cateringField['id'];
+        // Only prefill when genuinely empty - never override a value staff
+        // already typed (re-displayed form after a validation error) or an
+        // existing registration's already-saved quantity (edit mode).
+        if ($form->elementExists($elementName)) {
+          $currentValue = $form->getElement($elementName)->getValue();
+          if ($currentValue === NULL || $currentValue === '') {
+            $form->setDefaults([$elementName => $days]);
+          }
         }
       }
     }
@@ -136,14 +131,6 @@ function events_civicrm_buildForm($formName, &$form) {
         ts('Price set'),
         'info'
       );
-    }
-  }
-
-  if ($formName == 'CRM_Price_Form_Option') {
-    $priceSetId = CRM_Utils_Request::retrieve('sid', 'Positive');
-    $eventId = !empty($priceSetId) ? Helper::getEventIdForPriceSet($priceSetId) : NULL;
-    if (!empty($eventId) && Helper::eventHasLiveParticipants($eventId) && $form->elementExists('amount')) {
-      $form->getElement('amount')->freeze();
     }
   }
 }

@@ -8,7 +8,7 @@ use CRM_Events_BemasHelper as Helper;
  * derives the net Member/Non-member amount and keeps a CAT-<code> catering
  * field in sync. Only price field values marked as managed (JSON shadow in
  * their description column) are touched; flat tiers (Speaker, Responsible
- * Registration) are left alone. Locks once an event has live registrations.
+ * Registration) are left alone.
  *
  * Generic data-access/codec helpers live in CRM_Events_BemasHelper.
  */
@@ -30,42 +30,6 @@ class CRM_Events_BemasCatering {
   private static $pendingShadow = NULL;
 
   /**
-   * hook_civicrm_customPre - fires before the write, so (unlike
-   * onEventDetailsSave()'s hook_civicrm_custom) it can actually block a
-   * locked event's Catering rate/days from changing, on any save path.
-   */
-  public static function onEventDetailsPre($op, $groupID, $entityID, array &$params) {
-    if ((int) $groupID !== self::ACTIVITEIT_STATUS_CUSTOM_GROUP_ID || !in_array($op, ['create', 'edit'])) {
-      return;
-    }
-    $eventId = (int) $entityID;
-    if ($eventId <= 0 || !Helper::eventHasLiveParticipants($eventId)) {
-      return;
-    }
-
-    $rateFieldId = (int) CRM_Invoicestoexact_Config::singleton()->getEventCateringRateCustomField('id');
-    $daysFieldId = (int) CRM_Invoicestoexact_Config::singleton()->getEventCateringDaysCustomField('id');
-
-    $reverted = FALSE;
-    foreach ($params as &$field) {
-      $fieldId = (int) ($field['custom_field_id'] ?? 0);
-      if (!empty($rateFieldId) && $fieldId === $rateFieldId) {
-        $field['value'] = Helper::getCateringRate($eventId);
-        $reverted = TRUE;
-      }
-      elseif (!empty($daysFieldId) && $fieldId === $daysFieldId) {
-        $field['value'] = Helper::getCateringDays($eventId);
-        $reverted = TRUE;
-      }
-    }
-    unset($field);
-
-    if ($reverted) {
-      CRM_Core_Session::setStatus(ts('This event already has registrations - catering configuration can no longer be changed.'), ts('Locked'), 'error');
-    }
-  }
-
-  /**
    * Handle a save of the Catering rate / Catering days custom fields
    * (Activiteit_status group) - re-derive the CAT-* field and every
    * managed tier's net amount for this event.
@@ -75,17 +39,11 @@ class CRM_Events_BemasCatering {
    *   Unused directly - the authoritative values are re-read from the DB,
    *   since a single hook_civicrm_custom call only carries the field(s)
    *   that were actually touched, not the full picture.
-   *
-   * @throws Exception when the event already has live registrations.
    */
   public static function onEventDetailsSave($eventId, $params) {
     $eventId = (int) $eventId;
     if ($eventId <= 0) {
       return;
-    }
-
-    if (Helper::eventHasLiveParticipants($eventId)) {
-      throw new Exception(ts('This event already has registrations - catering configuration can no longer be changed.'));
     }
 
     $rate = Helper::getCateringRate($eventId);
@@ -128,12 +86,6 @@ class CRM_Events_BemasCatering {
    * @param string $op
    * @param int|null $id
    * @param array $params
-   *
-   * @throws Exception when the event already has live registrations AND a brand new
-   *   price option (op = 'create') is being added - there's no prior amount to revert
-   *   to, so this is the only way to block it. An edit to an *existing* option on a
-   *   locked event is instead silently reverted to its current amount (no throw) - see
-   *   the comment inline below for why.
    */
   public static function onPriceFieldValuePre($op, $id, array &$params) {
     if (!in_array($op, ['create', 'edit'])) {
@@ -164,23 +116,6 @@ class CRM_Events_BemasCatering {
     $eventId = self::resolveManagedEventForPriceSet((int) $fieldDao->price_set_id);
     if (empty($eventId)) {
       return;
-    }
-
-    if (Helper::eventHasLiveParticipants($eventId)) {
-      if ($op === 'edit' && !empty($id)) {
-        // Revert instead of throw: CRM_Price_Form_Option::postProcess() has no
-        // try/catch, so a thrown exception here becomes an uncaught fatal-error
-        // page. Reverting the amount makes the save a no-op without crashing.
-        $params['amount'] = (float) CRM_Core_DAO::singleValueQuery(
-          'SELECT amount FROM civicrm_price_field_value WHERE id = %1',
-          [1 => [(int) $id, 'Integer']],
-          TRUE,
-          FALSE
-        );
-        CRM_Core_Session::setStatus(ts('This event already has registrations - pricing can no longer be changed.'), ts('Locked'), 'error');
-        return;
-      }
-      throw new Exception(ts('This event already has registrations - pricing can no longer be changed.'));
     }
 
     $rate = Helper::getCateringRate($eventId);
@@ -306,7 +241,7 @@ class CRM_Events_BemasCatering {
    * @param string $code
    * @return array|null
    */
-  private static function findCateringField($priceSetId, $code) {
+  public static function findCateringField($priceSetId, $code) {
     return \Civi\Api4\PriceField::get(FALSE)
       ->addWhere('price_set_id', '=', $priceSetId)
       ->addWhere('label', '=', $code)

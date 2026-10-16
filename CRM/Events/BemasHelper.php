@@ -70,39 +70,6 @@ class CRM_Events_BemasHelper {
   }
 
   /**
-   * Check whether an event already has registrations, i.e. its pricing is locked.
-   *
-   * @param int $eventId
-   * @return bool TRUE if the event has at least one non-cancelled participant.
-   */
-  public static function eventHasLiveParticipants($eventId) {
-    $sql = "
-      SELECT 1
-      FROM civicrm_participant p
-      INNER JOIN civicrm_participant_status_type st ON st.id = p.status_id
-      WHERE p.event_id = %1 AND st.class <> 'Negative' AND p.is_test = 0
-      LIMIT 1
-    ";
-    return (bool) CRM_Core_DAO::singleValueQuery($sql, [1 => [(int) $eventId, 'Integer']]);
-  }
-
-  /**
-   * Resolve the event id a price set belongs to (for UI freezing purposes -
-   * unlike resolveManagedEventForPriceSet() in BemasCatering, does not refuse
-   * shared sets, since freezing a shared set's amount field when any one of
-   * its events is locked is the conservative, safe default for the UI).
-   *
-   * @param int $priceSetId
-   * @return int|null
-   */
-  public static function getEventIdForPriceSet($priceSetId) {
-    return (int) CRM_Core_DAO::singleValueQuery(
-      "SELECT entity_id FROM civicrm_price_set_entity WHERE price_set_id = %1 AND entity_table = 'civicrm_event' LIMIT 1",
-      [1 => [(int) $priceSetId, 'Integer']]
-    ) ?: NULL;
-  }
-
-  /**
    * Resolve an event's title, preferring the `_nl_NL` column (BEMAS's
    * operational language, and the only one automation logic should trust by
    * default) but falling back to `_en_US`/`_fr_FR` when the Dutch title

@@ -3,7 +3,8 @@
 ## 1.2.0
 
 * Added automated catering/event-fee price-field derivation: when an event's "Catering rate" is set (not "Exception"), the CAT-* catering price field and the net Member/Non-member registration amounts are now created/kept in sync automatically from the all-in price staff already enter, instead of requiring manual calculation
-* Pricing fields (registration fee, catering rate, catering days) now lock once an event has any live registrations, with no override
+* Registration fees, fee labels and catering rate/days stay editable at any time, including after an event has registrations - staff just need to be careful when changing fees once people have signed up (work item #30)
+* The CAT-* catering line's quantity on the back-office event registration form is now pre-filled with the event's configured Aantal cateringdagen (still freely editable), so staff don't need to look it up or retype it (work item #31)
 * New dependency on org.bemas.invoicestoexact (for the catering rate/days custom field configuration)
 
 ## 1.1.0
