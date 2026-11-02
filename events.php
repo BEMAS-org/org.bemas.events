@@ -14,6 +14,36 @@ function events_civicrm_custom($op, $groupID, $entityID, &$params) {
   }
 }
 
+/**
+ * Implements hook_civicrm_pre().
+ *
+ * Intercepts saves of a registration-fee Price Field Value to automatically
+ * derive its net (all-in minus catering) amount, for automation-managed
+ * events/tiers. See CRM_Events_BemasCatering for the full logic.
+ */
+function events_civicrm_pre($op, $objectName, $id, &$params) {
+  if ($objectName == 'PriceFieldValue' && in_array($op, ['create', 'edit'])) {
+    try {
+      CRM_Events_BemasCatering::onPriceFieldValuePre($op, $id, $params);
+    }
+    catch (Exception $e) {
+      CRM_Core_Session::setStatus($e->getMessage(), ts('Error'), 'error');
+    }
+  }
+}
+
+/**
+ * Implements hook_civicrm_post().
+ *
+ * Persists the shadow bookkeeping record for a brand new Price Field Value,
+ * once its id is known (see CRM_Events_BemasCatering::onPriceFieldValuePre()).
+ */
+function events_civicrm_post($op, $objectName, $objectId, $objectRef) {
+  if ($objectName == 'PriceFieldValue' && $op == 'create') {
+    CRM_Events_BemasCatering::onPriceFieldValuePost($objectId);
+  }
+}
+
 function events_civicrm_buildForm($formName, &$form) {
   global $language;
 
@@ -67,6 +97,40 @@ function events_civicrm_buildForm($formName, &$form) {
       if (count($defaults) > 0) {
         $form->setDefaults($defaults);
       }
+    }
+  }
+
+  if ($formName == 'CRM_Event_Form_Participant') {
+    $eventId = $form->getEventID();
+    if (!empty($eventId)) {
+      $days = CRM_Events_BemasHelper::getCateringDays($eventId);
+      $code = CRM_Invoicestoexact_ExactHelper::buildCateringCode(CRM_Events_BemasHelper::getEventCode($eventId));
+      $priceSetId = $code !== '' ? CRM_Price_BAO_PriceSet::getFor('civicrm_event', $eventId) : NULL;
+      $cateringField = !empty($priceSetId) ? CRM_Events_BemasCatering::findCateringField($priceSetId, $code) : NULL;
+      if ($days > 0 && !empty($cateringField)) {
+        $elementName = 'price_' . $cateringField['id'];
+        // Only prefill when genuinely empty - never override a value staff
+        // already typed (re-displayed form after a validation error) or an
+        // existing registration's already-saved quantity (edit mode).
+        if ($form->elementExists($elementName)) {
+          $currentValue = $form->getElement($elementName)->getValue();
+          if ($currentValue === NULL || $currentValue === '') {
+            $form->setDefaults([$elementName => $days]);
+          }
+        }
+      }
+    }
+  }
+
+  if ($formName == 'CRM_Event_Form_ManageEvent_Fee' && !empty($form->_id)) {
+    $priceSetId = CRM_Price_BAO_PriceSet::getFor('civicrm_event', (int) $form->_id);
+    if (!empty($priceSetId)) {
+      $url = CRM_Utils_System::url('civicrm/admin/price/field', 'reset=1&sid=' . $priceSetId);
+      CRM_Core_Session::setStatus(
+        ts('This event\'s price fields (including any automated catering field) can be viewed/edited directly at: %1', [1 => '<a href="' . $url . '" target="_blank">' . $url . '</a>']),
+        ts('Price set'),
+        'info'
+      );
     }
   }
 }
@@ -131,15 +195,7 @@ function events_civicrm_enable() {
  * Implements hook_civicrm_navigationMenu().
  *
  * @link http://wiki.civicrm.org/confluence/display/CRMDOC/hook_civicrm_navigationMenu
- *
+ */
 function events_civicrm_navigationMenu(&$menu) {
-  _events_civix_insert_navigation_menu($menu, 'Mailings', array(
-    'label' => E::ts('New subliminal message'),
-    'name' => 'mailing_subliminal_message',
-    'url' => 'civicrm/mailing/subliminal',
-    'permission' => 'access CiviMail',
-    'operator' => 'OR',
-    'separator' => 0,
-  ));
   _events_civix_navigationMenu($menu);
-} // */
+}

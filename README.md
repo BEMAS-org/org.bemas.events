@@ -1,5 +1,19 @@
 # org.bemas.events
 
+## Scheduled Reminders admin page override
+
+This extension overrides the core CiviCRM Scheduled Reminders admin page (`civicrm/admin/scheduleReminders`) with a custom SearchKit-based display.
+
+The override consists of:
+- `ang/afsearchScheduledReminders.aff.php` — afform metadata declaring the `server_route`; the afform scanner picks this up automatically and replaces the core route
+- `ang/afsearchScheduledReminders.aff.html` — afform template with help text, exposed filters (Active, Title, Reminder For) and the SearchKit table
+- `managed/scheduled_reminders.mgd.php` — defines the `SavedSearch` (`Scheduled_Reminder_Search_ixiam`) and `SearchDisplay` (`Scheduled_Reminder_Search_Table`) managed entities
+
+After deploying, run:
+```bash
+cv api4 Managed.reconcile '{"modules":["org.bemas.events"]}' && cv flush
+```
+
 ## Templates
 
 Er zijn 3 templates voor eventementen:

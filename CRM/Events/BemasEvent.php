@@ -12,6 +12,10 @@ class CRM_Events_BemasEvent {
         self::addSurveyLinks($entityID, $surveyNids);
       }
     }
+
+    if (self::isEventDetailsGroup($groupID)) {
+      CRM_Events_BemasCatering::onEventDetailsSave($entityID, $params);
+    }
   }
 
   private static function isEventEvaluationGroup($groupID) {
@@ -21,6 +25,10 @@ class CRM_Events_BemasEvent {
     else {
       return FALSE;
     }
+  }
+
+  private static function isEventDetailsGroup($groupID) {
+    return (int) $groupID === CRM_Events_BemasCatering::ACTIVITEIT_STATUS_CUSTOM_GROUP_ID;
   }
 
   private static function shouldCreateSurvey($eventId) {
